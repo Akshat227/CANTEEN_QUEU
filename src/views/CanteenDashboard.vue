@@ -219,14 +219,11 @@ const updateStatus = (orderId, status) => {
   }
 }
 
-const completeOrder = (orderId) => {
-  // Remove order or mark as completed
-  const orderIndex = orderStore.orders.findIndex(o => o.id === orderId)
-  if (orderIndex !== -1) {
-    orderStore.orders.splice(orderIndex, 1)
-    orderStore.saveOrders()
-    window.dispatchEvent(new CustomEvent('orderUpdated'))
-  }
+const completeOrder = async (orderId) => {
+  // Delete order (server or local)
+  await orderStore.deleteOrder(orderId)
+  // Notify same-tab listeners
+  window.dispatchEvent(new CustomEvent('orderUpdated'))
 }
 
 const formatTime = (dateString) => {

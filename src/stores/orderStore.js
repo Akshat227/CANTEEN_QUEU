@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { supabase } from '../lib/supabase'
 
 export const useOrderStore = defineStore('orders', () => {
   const orders = ref([])
@@ -14,33 +15,84 @@ export const useOrderStore = defineStore('orders', () => {
     { id: 8, name: 'Tea', price: 20, category: 'Beverages' },
   ])
 
-  // Load from localStorage
-  const loadOrders = () => {
-    const stored = localStorage.getItem('canteenOrders')
-    if (stored) {
-      orders.value = JSON.parse(stored)
+  // Supabase presence flag
+  const useSupabase = !!supabase
+
+  // Initialize: will set up realtime subscription if supabase is configured
+  let supabaseChannel = null
+
+  // Load orders: from Supabase if available, otherwise from localStorage
+  const loadOrders = async () => {
+    if (useSupabase) {
+      try {
+        const { data, error } = await supabase
+          .from('orders')
+          .select('*')
+          .order('created_at', { ascending: true })
+
+        if (error) {
+          console.error('Supabase loadOrders error', error)
+          return
+        }
+
+        orders.value = data.map(o => ({
+          id: o.id,
+          studentName: o.student_name,
+          studentId: o.student_id,
+          items: o.items,
+          total: Number(o.total),
+          status: o.status,
+          createdAt: o.created_at,
+          updatedAt: o.updated_at || o.created_at
+        }))
+      } catch (err) {
+        console.error('loadOrders exception', err)
+      }
+    } else {
+      const stored = localStorage.getItem('canteenOrders')
+      if (stored) {
+        orders.value = JSON.parse(stored)
+      }
     }
   }
 
-  // Save to localStorage
-  const saveOrders = () => {
-    localStorage.setItem('canteenOrders', JSON.stringify(orders.value))
-    // Trigger custom event for same-tab communication
-    window.dispatchEvent(new CustomEvent('orderUpdated'))
-    // Note: storage event only fires in other tabs, not the same tab
+  // Save orders: when using Supabase we generally perform per-record ops; keep no-op for bulk
+  const saveOrders = async () => {
+    if (!useSupabase) {
+      localStorage.setItem('canteenOrders', JSON.stringify(orders.value))
+      window.dispatchEvent(new CustomEvent('orderUpdated'))
+    }
   }
 
-  // Initialize
-  loadOrders()
+  const addOrder = async (orderData) => {
+    if (useSupabase) {
+      try {
+        const { data, error } = await supabase
+          .from('orders')
+          .insert([{
+            student_name: orderData.studentName,
+            student_id: orderData.studentId,
+            items: orderData.items,
+            total: orderData.total,
+            status: 'pending',
+            updated_at: new Date().toISOString()
+          }])
+          .select()
 
-  // Listen for storage changes (for real-time updates)
-  if (typeof window !== 'undefined') {
-    window.addEventListener('storage', () => {
-      loadOrders()
-    })
-  }
+        if (error) {
+          console.error('Supabase addOrder error', error)
+          return null
+        }
 
-  const addOrder = (orderData) => {
+        // data[0] contains inserted row with id
+        await loadOrders()
+        return data[0].id
+      } catch (err) {
+        console.error('addOrder exception', err)
+        return null
+      }
+    }
+
     const newOrder = {
       id: Date.now(),
       studentName: orderData.studentName,
@@ -56,7 +108,21 @@ export const useOrderStore = defineStore('orders', () => {
     return newOrder.id
   }
 
-  const updateOrderStatus = (orderId, status) => {
+  const updateOrderStatus = async (orderId, status) => {
+    if (useSupabase) {
+      try {
+        const { error } = await supabase
+          .from('orders')
+          .update({ status, updated_at: new Date().toISOString() })
+          .eq('id', orderId)
+
+        if (error) console.error('Supabase updateOrderStatus error', error)
+      } catch (err) {
+        console.error('updateOrderStatus exception', err)
+      }
+      return
+    }
+
     const order = orders.value.find(o => o.id === orderId)
     if (order) {
       order.status = status
@@ -81,16 +147,56 @@ export const useOrderStore = defineStore('orders', () => {
     return orders.value.find(o => o.id === id)
   }
 
+  const deleteOrder = async (id) => {
+    if (useSupabase) {
+      try {
+        const { error } = await supabase.from('orders').delete().eq('id', id)
+        if (error) console.error('Supabase deleteOrder error', error)
+      } catch (err) {
+        console.error('deleteOrder exception', err)
+      }
+      return
+    }
+
+    const idx = orders.value.findIndex(o => o.id === id)
+    if (idx !== -1) {
+      orders.value.splice(idx, 1)
+      saveOrders()
+    }
+  }
+  // Setup: load and (if supabase) subscribe to realtime changes
+  ;(async () => {
+    await loadOrders()
+
+    if (useSupabase && supabaseChannel === null) {
+      try {
+        supabaseChannel = supabase
+          .channel('public:orders')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
+            // reload entire list on any change
+            loadOrders()
+            // Also emit a custom event for same-tab listeners
+            window.dispatchEvent(new CustomEvent('orderUpdated'))
+          })
+          .subscribe()
+      } catch (err) {
+        console.error('Supabase subscription error', err)
+      }
+    }
+  })()
+
   return {
     orders,
     menuItems,
     addOrder,
     updateOrderStatus,
+    deleteOrder,
     pendingOrders,
     inProgressOrders,
     readyOrders,
     getOrderById,
-    loadOrders
+    loadOrders,
+    saveOrders
   }
 })
 
